@@ -14,8 +14,11 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.conf import settings
 
-from .models import Department, Debtor
-from .serializers import DepartmentSerializer, DebtorSerializer
+from .models import Department, Debtor, Product, ProductBatch
+from .serializers import (
+    DepartmentSerializer, DebtorSerializer,
+    ProductSerializer, ProductBatchSerializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,34 @@ DEMO_MASTERS = [
         "openingdepartment": "DEPT002", "area": "South Zone", "super_code": "DEBTO",
         "address": "Beach Road, Calicut", "city": "Calicut",
         "gstin": "32BBBCT2441L1ZV", "remarkcolumntitle": "Bill No",
+    },
+]
+
+DEMO_PRODUCTS = [
+    {
+        "code": "PRD001", "name": "Basmati Rice 1kg",
+        "size": "1kg", "sub_category": "Rice", "unit": "KG",
+        "taxcode": "GST5", "company": "Malabar", "product": "Rice",
+        "brand": "India Gate", "text6": "", "nameinsl": "Basmati Rice 1kg",
+    },
+    {
+        "code": "PRD002", "name": "Sunflower Oil 1L",
+        "size": "1L", "sub_category": "Oils", "unit": "LTR",
+        "taxcode": "GST5", "company": "Fortune", "product": "Oil",
+        "brand": "Fortune", "text6": "", "nameinsl": "Sunflower Oil 1L",
+    },
+]
+
+DEMO_BATCHES = [
+    {
+        "product_code": "PRD001", "barcode": "8901234567890",
+        "salesprice": 95.0, "secondprice": 92.0, "thirdprice": 90.0,
+        "fourthprice": 88.0, "nlc1": 80.0, "quantity": 100.0, "bmrp": 100.0,
+    },
+    {
+        "product_code": "PRD002", "barcode": "8901234567891",
+        "salesprice": 140.0, "secondprice": 135.0, "thirdprice": 132.0,
+        "fourthprice": 130.0, "nlc1": 120.0, "quantity": 50.0, "bmrp": 150.0,
     },
 ]
 
@@ -198,11 +229,146 @@ class DebtorDetailView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+# ── Products ──────────────────────────────────────────────────────────────
+
+class ProductListView(APIView):
+    """
+    GET  /api/products/  → list all products
+    POST /api/products/  → create or update a product
+    """
+
+    def get(self, request):
+        if is_demo_mode():
+            serializer = ProductSerializer(DEMO_PRODUCTS, many=True)
+            return Response({"count": len(DEMO_PRODUCTS), "results": serializer.data})
+
+        try:
+            products   = Product.objects.all()
+            serializer = ProductSerializer(products, many=True)
+            return Response({"count": products.count(), "results": serializer.data})
+        except Exception as e:
+            logger.exception("ProductListView.get failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def post(self, request):
+        serializer = ProductSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        fields = serializer.validated_data
+        code   = fields["code"]
+
+        if is_demo_mode():
+            existing = next((p for p in DEMO_PRODUCTS if p["code"] == code), None)
+            if existing:
+                existing.update(fields)
+                return Response({"message": "updated", "data": serializer.data}, status=status.HTTP_200_OK)
+            DEMO_PRODUCTS.append(dict(fields))
+            return Response({"message": "created", "data": serializer.data}, status=status.HTTP_201_CREATED)
+
+        try:
+            obj, created = Product.objects.update_or_create(
+                code=code,
+                defaults={k: v for k, v in fields.items() if k != "code"},
+            )
+            msg         = "created" if created else "updated"
+            http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            return Response({"message": msg, "data": ProductSerializer(obj).data}, status=http_status)
+        except Exception as e:
+            logger.exception("ProductListView.post failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProductDetailView(APIView):
+    """
+    GET /api/products/<code>/  → get one product by code
+    """
+
+    def get(self, request, code):
+        if is_demo_mode():
+            product = next((p for p in DEMO_PRODUCTS if p["code"] == code), None)
+            if not product:
+                return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(ProductSerializer(product).data)
+
+        try:
+            product = Product.objects.get(code=code)
+            return Response(ProductSerializer(product).data)
+        except Product.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.exception("ProductDetailView.get failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ── Product Batches ───────────────────────────────────────────────────────
+
+class ProductBatchListView(APIView):
+    """
+    GET  /api/productbatches/          → list all batches (?product=<code> to filter)
+    POST /api/productbatches/          → create a batch
+    """
+
+    def get(self, request):
+        if is_demo_mode():
+            product_filter = request.query_params.get("product")
+            data = [b for b in DEMO_BATCHES if not product_filter or b["product_code"] == product_filter]
+            serializer = ProductBatchSerializer(data, many=True)
+            return Response({"count": len(data), "results": serializer.data})
+
+        try:
+            qs             = ProductBatch.objects.all()
+            product_filter = request.query_params.get("product")
+            if product_filter:
+                qs = qs.filter(product_id=product_filter)
+            serializer = ProductBatchSerializer(qs, many=True)
+            return Response({"count": qs.count(), "results": serializer.data})
+        except Exception as e:
+            logger.exception("ProductBatchListView.get failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def post(self, request):
+        serializer = ProductBatchSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            obj = serializer.save()
+            return Response(
+                {"message": "created", "data": ProductBatchSerializer(obj).data},
+                status=status.HTTP_201_CREATED,
+            )
+        except Exception as e:
+            logger.exception("ProductBatchListView.post failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProductBatchDetailView(APIView):
+    """
+    GET /api/productbatches/<product_code>/  → get one batch by product code
+    """
+
+    def get(self, request, product_code):
+        if is_demo_mode():
+            batch = next((b for b in DEMO_BATCHES if b["product_code"] == product_code), None)
+            if not batch:
+                return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(ProductBatchSerializer(batch).data)
+
+        try:
+            batch = ProductBatch.objects.get(product_id=product_code)
+            return Response(ProductBatchSerializer(batch).data)
+        except ProductBatch.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.exception("ProductBatchDetailView.get failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 # ── Combined Sync ─────────────────────────────────────────────────────────
 
 class SyncView(APIView):
     """
-    GET /api/sync/  → returns both departments and debtors in one response.
+    GET /api/sync/  → returns departments, debtors, products and batches in one response.
     Used by sync.py pull mode and the Test API button.
     """
 
@@ -217,11 +383,21 @@ class SyncView(APIView):
                     "count":   len(DEMO_MASTERS),
                     "results": DebtorSerializer(DEMO_MASTERS, many=True).data,
                 },
+                "products": {
+                    "count":   len(DEMO_PRODUCTS),
+                    "results": ProductSerializer(DEMO_PRODUCTS, many=True).data,
+                },
+                "productbatches": {
+                    "count":   len(DEMO_BATCHES),
+                    "results": ProductBatchSerializer(DEMO_BATCHES, many=True).data,
+                },
             })
 
         try:
-            depts   = Department.objects.all()
-            debtors = Debtor.objects.filter(super_code='DEBTO')
+            depts    = Department.objects.all()
+            debtors  = Debtor.objects.filter(super_code='DEBTO')
+            products = Product.objects.all()
+            batches  = ProductBatch.objects.all()
 
             return Response({
                 "departments": {
@@ -232,10 +408,19 @@ class SyncView(APIView):
                     "count":   debtors.count(),
                     "results": DebtorSerializer(debtors, many=True).data,
                 },
+                "products": {
+                    "count":   products.count(),
+                    "results": ProductSerializer(products, many=True).data,
+                },
+                "productbatches": {
+                    "count":   batches.count(),
+                    "results": ProductBatchSerializer(batches, many=True).data,
+                },
             })
         except Exception as e:
             logger.exception("SyncView.get failed")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 # ── Bulk upsert endpoints ─────────────────────────────────────────────────
 
@@ -288,7 +473,6 @@ class DebtorBulkView(APIView):
         if not isinstance(records, list):
             return Response({"error": "Expected a JSON array"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Build list of Debtor objects for bulk_create / bulk_update
         to_create = []
         to_update = []
         existing_codes = set(
@@ -317,14 +501,12 @@ class DebtorBulkView(APIView):
                 to_create.append(obj)
 
         created = updated = 0
-        update_fields = self.ALL_FIELDS
-
         try:
             if to_create:
                 Debtor.objects.bulk_create(to_create, ignore_conflicts=True)
                 created = len(to_create)
             if to_update:
-                Debtor.objects.bulk_update(to_update, update_fields)
+                Debtor.objects.bulk_update(to_update, self.ALL_FIELDS)
                 updated = len(to_update)
         except Exception as e:
             logger.exception("DebtorBulkView bulk operation failed")
@@ -333,21 +515,153 @@ class DebtorBulkView(APIView):
         return Response({"created": created, "updated": updated, "errors": errors})
 
 
+class ProductBulkView(APIView):
+    """POST /api/products/bulk/ — upsert a list of products at once."""
+
+    STR_FIELDS  = {
+        'name', 'size', 'sub_category', 'unit', 'taxcode',
+        'company', 'product', 'brand', 'text6', 'nameinsl',
+    }
+    ALL_FIELDS = [
+        'name', 'size', 'sub_category', 'unit', 'taxcode',
+        'company', 'product', 'brand', 'text6', 'nameinsl',
+    ]
+
+    def post(self, request):
+        records = request.data
+        if not isinstance(records, list):
+            return Response({"error": "Expected a JSON array"}, status=status.HTTP_400_BAD_REQUEST)
+
+        existing_codes = set(
+            Product.objects.filter(
+                code__in=[r.get("code") for r in records if r.get("code")]
+            ).values_list("code", flat=True)
+        )
+
+        to_create, to_update, errors = [], [], 0
+        for item in records:
+            code = item.get("code", "")
+            if not code:
+                errors += 1
+                continue
+            defaults = {}
+            for field in self.ALL_FIELDS:
+                val = item.get(field)
+                if val is None and field in self.STR_FIELDS:
+                    val = ""
+                defaults[field] = val
+
+            obj = Product(code=code, **defaults)
+            (to_update if code in existing_codes else to_create).append(obj)
+
+        try:
+            if to_create:
+                Product.objects.bulk_create(to_create, ignore_conflicts=True)
+            if to_update:
+                Product.objects.bulk_update(to_update, self.ALL_FIELDS)
+        except Exception as e:
+            logger.exception("ProductBulkView bulk operation failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({"created": len(to_create), "updated": len(to_update), "errors": errors})
+
+
+class ProductBatchBulkView(APIView):
+    """POST /api/productbatches/bulk/ — upsert batches keyed on product_code.
+
+    One batch row per product. If the source has several batch rows for a
+    product, the last one received wins (sync.py orders by slno, so the most
+    recent batch is kept). One existence-lookup query plus
+    bulk_create/bulk_update.
+    """
+
+    ALL_FIELDS = [
+        'barcode', 'salesprice', 'secondprice', 'thirdprice', 'fourthprice',
+        'nlc1', 'quantity', 'bmrp',
+    ]
+    STR_FIELDS = {'barcode'}
+
+    def post(self, request):
+        records = request.data
+        if not isinstance(records, list):
+            return Response({"error": "Expected a JSON array"}, status=status.HTTP_400_BAD_REQUEST)
+
+        valid_records = []
+        errors = 0
+        for item in records:
+            if not item.get("product_code"):
+                errors += 1
+                continue
+            valid_records.append(item)
+
+        # Collapse duplicate product_code within this chunk — last one wins.
+        deduped = {}
+        for item in valid_records:
+            deduped[item["product_code"]] = item
+        valid_records = list(deduped.values())
+
+        # One query to find which product_code values already exist
+        codes = [r["product_code"] for r in valid_records]
+        existing = set(
+            ProductBatch.objects.filter(product_id__in=codes).values_list("product_id", flat=True)
+        )
+
+        to_create, to_update = [], []
+        for item in valid_records:
+            product_code = item["product_code"]
+            defaults     = {}
+            for f in self.ALL_FIELDS:
+                val = item.get(f)
+                if val is None and f in self.STR_FIELDS:
+                    val = ""
+                defaults[f] = val
+
+            obj = ProductBatch(product_id=product_code, **defaults)
+            (to_update if product_code in existing else to_create).append(obj)
+
+        created = updated = 0
+        try:
+            if to_create:
+                ProductBatch.objects.bulk_create(to_create, ignore_conflicts=True, batch_size=500)
+                created = len(to_create)
+            if to_update:
+                ProductBatch.objects.bulk_update(to_update, self.ALL_FIELDS, batch_size=500)
+                updated = len(to_update)
+        except Exception as e:
+            logger.exception("ProductBatchBulkView bulk operation failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({"created": created, "updated": updated, "errors": errors})
+
+
 # ── Reset / Truncate ──────────────────────────────────────────────────────
 
 class ResetView(APIView):
-    """DELETE /api/reset/ — wipe all departments and debtors for a clean sync."""
+    """DELETE /api/reset/ — wipe all departments, debtors, products and batches for a clean sync."""
 
     def delete(self, request):
         if is_demo_mode():
             DEMO_DEPARTMENTS.clear()
             DEMO_MASTERS.clear()
-            return Response({"departments_deleted": 0, "debtors_deleted": 0})
+            DEMO_PRODUCTS.clear()
+            DEMO_BATCHES.clear()
+            return Response({
+                "departments_deleted": 0, "debtors_deleted": 0,
+                "products_deleted": 0, "productbatches_deleted": 0,
+            })
         try:
+            # Batches must be deleted before products (FK constraint)
+            b = ProductBatch.objects.all().delete()[0]
+            p = Product.objects.all().delete()[0]
             d = Department.objects.all().delete()[0]
             m = Debtor.objects.all().delete()[0]
-            logger.info(f"Reset: {d} depts, {m} debtors deleted")
-            return Response({"departments_deleted": d, "debtors_deleted": m})
+            logger.info(f"Reset: {d} depts, {m} debtors, {p} products, {b} batches deleted")
+            return Response({
+                "departments_deleted":    d,
+                "debtors_deleted":        m,
+                "products_deleted":       p,
+                "productbatches_deleted": b,
+            })
         except Exception as e:
             logger.exception("ResetView.delete failed")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
